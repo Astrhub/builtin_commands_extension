@@ -12,6 +12,8 @@ from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.provider.entities import ProviderType
 from astrbot.core.utils.error_redaction import safe_error
 
+from ._compat import get_using_provider_compat
+
 if TYPE_CHECKING:
     from astrbot.core.provider.provider import Provider
 
@@ -86,24 +88,52 @@ class ProviderCommands:
     def __init__(self, context: star.Context) -> None:
         self.context = context
         self._model_cache = _ModelCache()
+        self._registered_hook_mode: str | None = None
         self._register_provider_change_hook()
 
     def _register_provider_change_hook(self) -> None:
-        set_change_callback = getattr(
-            self.context.provider_manager,
-            "set_provider_change_callback",
-            None,
-        )
-        if callable(set_change_callback):
-            set_change_callback(self._on_provider_manager_changed)
+        provider_mgr = getattr(self.context, "provider_manager", None)
+        if provider_mgr is None:
             return
         register_change_hook = getattr(
-            self.context.provider_manager,
+            provider_mgr,
             "register_provider_change_hook",
             None,
         )
         if callable(register_change_hook):
             register_change_hook(self._on_provider_manager_changed)
+            self._registered_hook_mode = "hook"
+            return
+        set_change_callback = getattr(
+            provider_mgr,
+            "set_provider_change_callback",
+            None,
+        )
+        if callable(set_change_callback):
+            set_change_callback(self._on_provider_manager_changed)
+            self._registered_hook_mode = "callback"
+
+    def cleanup(self) -> None:
+        """Unregister provider change callbacks and clear cached model lists."""
+        provider_mgr = getattr(self.context, "provider_manager", None)
+        if provider_mgr is not None:
+            if self._registered_hook_mode == "hook":
+                hooks = getattr(provider_mgr, "_provider_change_hooks", None)
+                if isinstance(hooks, list):
+                    try:
+                        hooks.remove(self._on_provider_manager_changed)
+                    except ValueError:
+                        pass
+            elif self._registered_hook_mode == "callback":
+                if (
+                    getattr(provider_mgr, "_provider_change_callback", None)
+                    == self._on_provider_manager_changed
+                ):
+                    set_cb = getattr(provider_mgr, "set_provider_change_callback", None)
+                    if callable(set_cb):
+                        set_cb(None)
+        self._registered_hook_mode = None
+        self._model_cache.invalidate()
 
     def invalidate_provider_models_cache(
         self, provider_id: str | None = None, *, umo: str | None = None
@@ -415,7 +445,7 @@ class ProviderCommands:
         idx_or_name: int | str | None = None,
     ) -> None:
         """查看或者切换模型"""
-        prov = self.context.get_using_provider(message.unified_msg_origin)
+        prov = await get_using_provider_compat(self.context, message.unified_msg_origin)
         if not prov:
             message.set_result(
                 MessageEventResult().message("未找到任何 LLM 提供商。请先配置。"),
@@ -445,7 +475,7 @@ class ProviderCommands:
 
             ret = "".join(parts)
             message.set_result(MessageEventResult().message(ret).use_t2i(False))
-        elif isinstance(idx_or_name, int):
+        elif isinstance(idx_or_name, int) and not isinstance(idx_or_name, bool):
             models = await self._get_models_or_reply_error(
                 message,
                 prov,
@@ -476,4 +506,4 @@ class ProviderCommands:
                     )
                     return
         else:
-            await self._switch_model_by_name(message, idx_or_name, prov)
+            await self._switch_model_by_name(message, str(idx_or_name), prov)
