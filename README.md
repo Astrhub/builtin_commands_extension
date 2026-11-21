@@ -1,22 +1,27 @@
 # Builtin Commands Extension
 
-这是 AstrBot 的内置指令扩展插件。
+这是 AstrBot 的内置指令扩展插件，同时兼容 AstrBot `v4.23+` 和 `v4.30.0-beta.1+`。
 
 从 AstrBot `builtin_commands` 中迁出的非核心指令会放在这里维护。核心内置指令仍保留在 AstrBot 主程序中，包括：
 
-- `/sid`
-- `/stop`
-- `/reset`
-- `/new`
-- `/dashboard_update`
 - `/help`
+- `/sid`
+- `/name`
+- `/reset`
+- `/stop`
+- `/new`
+- `/stats`
+- `/provider`
+- `/dashboard_update`
+- `/set`
+- `/unset`
 
 ## 提供的指令
 
 本插件提供以下扩展指令：
 
-- `/llm`：开启或关闭 LLM 聊天功能
-- `/plugin`：插件管理
+- `/llm`：开启或关闭 LLM 聊天功能（在 AstrBot `v4.30+` 下为当前会话写入覆盖，支持 `/llm --inherit` 恢复继承）
+- `/plugin`：插件管理（`ls` / `on` / `off` / `get` / `help`）
 - `/op`：授权管理员
 - `/deop`：取消管理员授权
 - `/model`：查看或切换模型
@@ -26,9 +31,7 @@
 - `/switch`：切换对话
 - `/rename`：重命名当前对话
 - `/del`：删除当前对话
-- `/persona`：查看或切换 Persona
-- `/set`：设置会话变量
-- `/unset`：移除会话变量
+- `/persona`：查看或切换 Persona（在 AstrBot `v4.30+` 下支持 `/persona --inherit` 恢复继承）
 
 ## 说明
 
