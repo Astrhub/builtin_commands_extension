@@ -53,6 +53,29 @@ class ConversationCommands:
             return None
         return conv.persona_id
 
+    async def _resolve_session_persona_name(
+        self,
+        umo: str,
+        platform_name: str,
+        provider_settings: dict,
+    ) -> str | None:
+        if not uses_session_override_persona(self.context):
+            return None
+        (
+            session_persona_id,
+            _,
+            _,
+            _,
+            _,
+        ) = await resolve_selected_persona_compat(
+            self.context,
+            umo=umo,
+            conversation_persona_id=None,
+            platform_name=platform_name,
+            provider_settings=provider_settings,
+        )
+        return _format_persona_name(session_persona_id)
+
     async def his(self, message: AstrMessageEvent, page: int = 1) -> None:
         """查看对话记录"""
         if not await get_using_provider_compat(self.context, message.unified_msg_origin):
@@ -130,30 +153,17 @@ class ConversationCommands:
 
         provider_settings = cfg.get("provider_settings", {})
         platform_name = message.get_platform_name()
-        is_session_override_model = uses_session_override_persona(self.context)
-        if is_session_override_model:
-            (
-                session_persona_id,
-                _,
-                _,
-                _,
-                _,
-            ) = await resolve_selected_persona_compat(
-                self.context,
-                umo=umo,
-                conversation_persona_id=None,
-                platform_name=platform_name,
-                provider_settings=provider_settings,
-            )
-            session_persona_name = _format_persona_name(session_persona_id)
-        else:
-            session_persona_name = "无"
+        session_persona_name = await self._resolve_session_persona_name(
+            umo=umo,
+            platform_name=platform_name,
+            provider_settings=provider_settings,
+        )
 
         if not conversations_paged:
             parts.append("暂无对话。\n")
         else:
             for conv in conversations_paged:
-                if is_session_override_model:
+                if session_persona_name is not None:
                     persona_name = session_persona_name
                 else:
                     (
@@ -191,7 +201,7 @@ class ConversationCommands:
         else:
             ret += "\n当前对话: 无"
 
-        if is_session_override_model:
+        if session_persona_name is not None:
             ret += f"\n当前会话人格情景: {session_persona_name}"
 
         if is_unique_session_enabled(self.context, message):
