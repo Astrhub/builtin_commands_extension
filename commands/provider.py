@@ -119,11 +119,8 @@ class ProviderCommands:
         if provider_mgr is not None:
             if self._registered_hook_mode == "hook":
                 hooks = getattr(provider_mgr, "_provider_change_hooks", None)
-                if isinstance(hooks, list):
-                    try:
-                        hooks.remove(self._on_provider_manager_changed)
-                    except ValueError:
-                        pass
+                if isinstance(hooks, list) and self._on_provider_manager_changed in hooks:
+                    hooks.remove(self._on_provider_manager_changed)
             elif self._registered_hook_mode == "callback":
                 if (
                     getattr(provider_mgr, "_provider_change_callback", None)

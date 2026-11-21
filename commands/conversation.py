@@ -131,8 +131,6 @@ class ConversationCommands:
         provider_settings = cfg.get("provider_settings", {})
         platform_name = message.get_platform_name()
         is_session_override_model = uses_session_override_persona(self.context)
-        session_persona_id: str | None = None
-        session_persona_name = "无"
         if is_session_override_model:
             (
                 session_persona_id,
@@ -148,6 +146,8 @@ class ConversationCommands:
                 provider_settings=provider_settings,
             )
             session_persona_name = _format_persona_name(session_persona_id)
+        else:
+            session_persona_name = "无"
 
         if not conversations_paged:
             parts.append("暂无对话。\n")
