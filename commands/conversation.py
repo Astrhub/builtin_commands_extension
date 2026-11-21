@@ -1,22 +1,38 @@
 import datetime
 
-from astrbot.api import sp, star
+from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
-from astrbot.core.agent.runners.deerflow.constants import (
-    DEERFLOW_PROVIDER_TYPE,
-    DEERFLOW_THREAD_ID_KEY,
-)
 from astrbot.core.platform.astr_message_event import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.active_event_registry import active_event_registry
 
-THIRD_PARTY_AGENT_RUNNER_KEY = {
-    "dify": "dify_conversation_id",
-    "coze": "coze_conversation_id",
-    "dashscope": "dashscope_conversation_id",
-    DEERFLOW_PROVIDER_TYPE: DEERFLOW_THREAD_ID_KEY,
-}
-THIRD_PARTY_AGENT_RUNNER_STR = ", ".join(THIRD_PARTY_AGENT_RUNNER_KEY.keys())
+from ._compat import (
+    THIRD_PARTY_AGENT_RUNNER_KEY,
+    THIRD_PARTY_AGENT_RUNNER_STR,
+    clear_third_party_agent_runner_state,
+    get_agent_runtime,
+    get_using_provider_compat,
+    is_event_admin,
+    is_unique_session_enabled,
+    mark_clean_group_context,
+    resolve_selected_persona_compat,
+    update_conversation_title_compat,
+    uses_session_override_persona,
+)
+
+
+def _format_persona_name(
+    persona_id: str | None,
+    force_applied_persona_id: str | None = None,
+) -> str:
+    if persona_id == "[%None]" or not persona_id:
+        persona_name = "无"
+    else:
+        persona_name = persona_id
+
+    if force_applied_persona_id:
+        persona_name = f"{persona_name} (自定义规则)"
+    return persona_name
 
 
 class ConversationCommands:
@@ -39,13 +55,14 @@ class ConversationCommands:
 
     async def his(self, message: AstrMessageEvent, page: int = 1) -> None:
         """查看对话记录"""
-        if not self.context.get_using_provider(message.unified_msg_origin):
+        if not await get_using_provider_compat(self.context, message.unified_msg_origin):
             message.set_result(
                 MessageEventResult().message("未找到任何 LLM 提供商。请先配置。"),
             )
             return
 
         size_per_page = 6
+        page = max(1, page)
 
         conv_mgr = self.context.conversation_manager
         umo = message.unified_msg_origin
@@ -82,10 +99,9 @@ class ConversationCommands:
 
     async def convs(self, message: AstrMessageEvent, page: int = 1) -> None:
         """查看对话列表"""
-        cfg = self.context.get_config(umo=message.unified_msg_origin)
-        agent_runner_type = cfg.get("agent_runner", {}).get("runner_type")
-        if agent_runner_type is None:
-            agent_runner_type = cfg["provider_settings"]["agent_runner_type"]
+        umo = message.unified_msg_origin
+        cfg = self.context.get_config(umo=umo)
+        agent_runner_type = get_agent_runtime(cfg)
         if agent_runner_type in THIRD_PARTY_AGENT_RUNNER_KEY:
             message.set_result(
                 MessageEventResult().message(
@@ -95,75 +111,90 @@ class ConversationCommands:
             return
 
         size_per_page = 6
-        """获取所有对话列表"""
         conversations_all = await self.context.conversation_manager.get_conversations(
-            message.unified_msg_origin,
+            umo,
         )
-        """计算总页数"""
         total_pages = (len(conversations_all) + size_per_page - 1) // size_per_page
-        """确保页码有效"""
-        page = max(1, min(page, total_pages))
-        """分页处理"""
+        page = max(1, min(page, total_pages)) if total_pages > 0 else 1
         start_idx = (page - 1) * size_per_page
         end_idx = start_idx + size_per_page
         conversations_paged = conversations_all[start_idx:end_idx]
 
         parts = ["对话列表：\n---\n"]
-        """全局序号从当前页的第一个开始"""
         global_index = start_idx + 1
 
-        """生成所有对话的标题字典"""
         _titles = {}
         for conv in conversations_all:
             title = conv.title if conv.title else "新对话"
             _titles[conv.cid] = title
 
-        """遍历分页后的对话生成列表显示"""
         provider_settings = cfg.get("provider_settings", {})
         platform_name = message.get_platform_name()
-        for conv in conversations_paged:
+        is_session_override_model = uses_session_override_persona(self.context)
+        session_persona_id: str | None = None
+        session_persona_name = "无"
+        if is_session_override_model:
             (
-                persona_id,
+                session_persona_id,
                 _,
-                force_applied_persona_id,
                 _,
-            ) = await self.context.persona_manager.resolve_selected_persona(
-                umo=message.unified_msg_origin,
-                conversation_persona_id=conv.persona_id,
+                _,
+                _,
+            ) = await resolve_selected_persona_compat(
+                self.context,
+                umo=umo,
+                conversation_persona_id=None,
                 platform_name=platform_name,
                 provider_settings=provider_settings,
             )
-            if persona_id == "[%None]":
-                persona_name = "无"
-            elif persona_id:
-                persona_name = persona_id
-            else:
-                persona_name = "无"
+            session_persona_name = _format_persona_name(session_persona_id)
 
-            if force_applied_persona_id:
-                persona_name = f"{persona_name} (自定义规则)"
+        if not conversations_paged:
+            parts.append("暂无对话。\n")
+        else:
+            for conv in conversations_paged:
+                if is_session_override_model:
+                    persona_name = session_persona_name
+                else:
+                    (
+                        persona_id,
+                        _,
+                        force_applied_persona_id,
+                        _,
+                        _,
+                    ) = await resolve_selected_persona_compat(
+                        self.context,
+                        umo=umo,
+                        conversation_persona_id=conv.persona_id,
+                        platform_name=platform_name,
+                        provider_settings=provider_settings,
+                    )
+                    persona_name = _format_persona_name(
+                        persona_id,
+                        force_applied_persona_id,
+                    )
 
-            title = _titles.get(conv.cid, "新对话")
-            parts.append(
-                f"{global_index}. {title}({conv.cid[:4]})\n  人格情景: {persona_name}\n  上次更新: {datetime.datetime.fromtimestamp(conv.updated_at).strftime('%m-%d %H:%M')}\n"
-            )
-            global_index += 1
+                title = _titles.get(conv.cid, "新对话")
+                parts.append(
+                    f"{global_index}. {title}({conv.cid[:4]})\n"
+                    f"  人格情景: {persona_name}\n"
+                    f"  上次更新: {datetime.datetime.fromtimestamp(conv.updated_at).strftime('%m-%d %H:%M')}\n"
+                )
+                global_index += 1
 
         parts.append("---\n")
         ret = "".join(parts)
-        curr_cid = await self.context.conversation_manager.get_curr_conversation_id(
-            message.unified_msg_origin,
-        )
+        curr_cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
         if curr_cid:
-            """从所有对话的标题字典中获取标题"""
             title = _titles.get(curr_cid, "新对话")
             ret += f"\n当前对话: {title}({curr_cid[:4]})"
         else:
             ret += "\n当前对话: 无"
 
-        cfg = self.context.get_config(umo=message.unified_msg_origin)
-        unique_session = cfg["platform_settings"]["unique_session"]
-        if unique_session:
+        if is_session_override_model:
+            ret += f"\n当前会话人格情景: {session_persona_name}"
+
+        if is_unique_session_enabled(self.context, message):
             ret += "\n会话隔离粒度: 个人"
         else:
             ret += "\n会话隔离粒度: 群聊"
@@ -172,35 +203,47 @@ class ConversationCommands:
         ret += "\n*输入 /ls 2 跳转到第 2 页"
 
         message.set_result(MessageEventResult().message(ret).use_t2i(False))
-        return
 
     async def groupnew_conv(self, message: AstrMessageEvent, sid: str = "") -> None:
         """创建新群聊对话"""
-        if sid:
-            session = str(
-                MessageSession(
-                    platform_name=message.platform_meta.id,
-                    message_type=MessageType("GroupMessage"),
-                    session_id=sid,
-                ),
-            )
-
-            cpersona = await self._get_current_persona_id(session)
-            active_event_registry.stop_all(session, exclude=message)
-            cid = await self.context.conversation_manager.new_conversation(
-                session,
-                message.get_platform_id(),
-                persona_id=cpersona,
-            )
-            message.set_result(
-                MessageEventResult().message(
-                    f"群聊 {session} 已切换到新对话: 新对话({cid[:4]})。",
-                ),
-            )
-        else:
+        sid = sid.strip()
+        if not sid:
             message.set_result(
                 MessageEventResult().message("请输入群聊 ID。/groupnew 群聊ID。"),
             )
+            return
+
+        session = str(
+            MessageSession(
+                platform_name=message.platform_meta.id,
+                message_type=MessageType("GroupMessage"),
+                session_id=sid,
+            ),
+        )
+
+        session_cfg = self.context.get_config(umo=session)
+        agent_runner_type = get_agent_runtime(session_cfg)
+        active_event_registry.stop_all(session, exclude=message)
+        if agent_runner_type in THIRD_PARTY_AGENT_RUNNER_KEY:
+            await clear_third_party_agent_runner_state(
+                self.context,
+                session,
+                agent_runner_type,
+            )
+
+        cpersona = await self._get_current_persona_id(session)
+        cid = await self.context.conversation_manager.new_conversation(
+            session,
+            message.get_platform_id(),
+            persona_id=cpersona,
+        )
+        if session == message.unified_msg_origin:
+            mark_clean_group_context(message)
+        message.set_result(
+            MessageEventResult().message(
+                f"群聊 {session} 已切换到新对话: 新对话({cid[:4]})。",
+            ),
+        )
 
     async def switch_conv(
         self,
@@ -208,12 +251,6 @@ class ConversationCommands:
         index: int | None = None,
     ) -> None:
         """通过 /ls 前面的序号切换对话"""
-        if not isinstance(index, int):
-            message.set_result(
-                MessageEventResult().message("类型错误，请输入数字对话序号。"),
-            )
-            return
-
         if index is None:
             message.set_result(
                 MessageEventResult().message(
@@ -221,6 +258,13 @@ class ConversationCommands:
                 ),
             )
             return
+
+        if isinstance(index, bool) or not isinstance(index, int):
+            message.set_result(
+                MessageEventResult().message("类型错误，请输入数字对话序号。"),
+            )
+            return
+
         conversations = await self.context.conversation_manager.get_conversations(
             message.unified_msg_origin,
         )
@@ -244,22 +288,30 @@ class ConversationCommands:
 
     async def rename_conv(self, message: AstrMessageEvent, new_name: str = "") -> None:
         """重命名对话"""
+        new_name = new_name.strip()
         if not new_name:
             message.set_result(MessageEventResult().message("请输入新的对话名称。"))
             return
-        await self.context.conversation_manager.update_conversation_title(
+        updated = await update_conversation_title_compat(
+            self.context,
             message.unified_msg_origin,
             new_name,
         )
+        if not updated:
+            message.set_result(
+                MessageEventResult().message(
+                    "当前未处于对话状态，请 /switch 序号 切换或 /new 创建。",
+                ),
+            )
+            return
         message.set_result(MessageEventResult().message("重命名对话成功。"))
 
     async def del_conv(self, message: AstrMessageEvent) -> None:
         """删除当前对话"""
         umo = message.unified_msg_origin
-        cfg = self.context.get_config(umo=umo)
-        is_unique_session = cfg["platform_settings"]["unique_session"]
-        if message.get_group_id() and not is_unique_session and message.role != "admin":
-            # 群聊，没开独立会话，发送人不是管理员
+        is_isolated = is_unique_session_enabled(self.context, message)
+        if message.get_group_id() and not is_isolated and not is_event_admin(message):
+            # 群聊，没开独立会话（或平台不支持隔离），且发送人不是管理员
             message.set_result(
                 MessageEventResult().message(
                     f"会话处于群聊，并且未开启独立会话，并且您 (ID {message.get_sender_id()}) 不是管理员，因此没有权限删除当前对话。",
@@ -267,16 +319,16 @@ class ConversationCommands:
             )
             return
 
-        agent_runner_type = cfg.get("agent_runner", {}).get("runner_type")
-        if agent_runner_type is None:
-            agent_runner_type = cfg["provider_settings"]["agent_runner_type"]
+        cfg = self.context.get_config(umo=umo)
+        agent_runner_type = get_agent_runtime(cfg)
         if agent_runner_type in THIRD_PARTY_AGENT_RUNNER_KEY:
             active_event_registry.stop_all(umo, exclude=message)
-            await sp.remove_async(
-                scope="umo",
-                scope_id=umo,
-                key=THIRD_PARTY_AGENT_RUNNER_KEY[agent_runner_type],
+            await clear_third_party_agent_runner_state(
+                self.context,
+                umo,
+                agent_runner_type,
             )
+            mark_clean_group_context(message)
             message.set_result(MessageEventResult().message("重置对话成功。"))
             return
 
@@ -300,5 +352,5 @@ class ConversationCommands:
         )
 
         ret = "删除当前对话成功。不再处于对话状态，使用 /switch 序号 切换到其他对话或 /new 创建。"
-        message.set_extra("_clean_ltm_session", True)
+        mark_clean_group_context(message)
         message.set_result(MessageEventResult().message(ret))
